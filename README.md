@@ -20,41 +20,8 @@ so i built this instead. upload a JSON, take a quiz, get your score. that's it.
 
 ---
 
-## getting started
+# getting started
 
-```bash
-npm create vite@latest wompwomp -- --template react
-cd wompwomp
-npm install
-```
-
-replace the contents of `src/App.jsx` with the quiz app code, then delete `src/App.css` and `src/index.css`. also remove these lines if they exist:
-
-```js
-// delete these from main.jsx and App.jsx
-import './index.css'
-import './App.css'
-```
-
-then run:
-
-```bash
-npm run dev
-```
-
-open `localhost:5173` and you're good.
-
----
-
-## deploying
-
-```bash
-npm run build
-```
-
-drag the `dist/` folder to [netlify drop](https://app.netlify.com/drop) for instant hosting. or push to github and connect to [vercel](https://vercel.com) for auto-deploys.
-
----
 
 ## quiz JSON format
 
@@ -103,7 +70,7 @@ the app expects a `.json` file with this structure:
 
 this is the real move. take your notes, paste them into claude (or any LLM), and get a quiz JSON back in seconds.
 
-### on claude
+### on claude (or any capable LLM)
 
 1. upload your notes file (docx, pdf, txt, whatever)
 2. use this prompt:
@@ -129,10 +96,6 @@ just add this to your prompt:
 ```
 output ONLY the raw JSON, no markdown code blocks, no explanation before or after
 ```
-
-### for other LLMs (chatgpt, gemini, etc.)
-
-same prompt works. just make sure the output matches the JSON format above. the key names (`mcq`, `true_or_false`, `question`, `options`, `answer`, `explanation`, `statement`) need to match exactly.
 
 ---
 
