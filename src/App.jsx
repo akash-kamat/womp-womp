@@ -84,6 +84,7 @@ const Icons = {
   book: (p) => <Icon d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 19.5A2.5 2.5 0 0 0 6.5 22H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15z" {...p} />,
   star: (p) => <Icon d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.56 5.82 22 7 14.14 2 9.27l6.91-1.01L12 2z" {...p} />,
   retry: (p) => <Icon d="M1 4v6h6M23 20v-6h-6M20.49 9A9 9 0 0 0 5.64 5.64L1 10M23 14l-4.64 4.36A9 9 0 0 1 3.51 15" {...p} />,
+  settings: (p) => <Icon d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.42 1.42-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V20h-2v-.48a1.7 1.7 0 0 0-1.03-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06-1.42-1.42.06-.06A1.7 1.7 0 0 0 9.4 15a1.7 1.7 0 0 0-1.56-1.03H7.36v-2h.48A1.7 1.7 0 0 0 9.4 10a1.7 1.7 0 0 0-.34-1.88L9 8.06l1.42-1.42.06.06A1.7 1.7 0 0 0 12.36 7a1.7 1.7 0 0 0 1.03-1.56V5h2v.44A1.7 1.7 0 0 0 16.42 7a1.7 1.7 0 0 0 1.88-.34l.06-.06 1.42 1.42-.06.06A1.7 1.7 0 0 0 19.4 10a1.7 1.7 0 0 0 1.56 1.03h.48v2h-.48A1.7 1.7 0 0 0 19.4 15z" {...p} />,
 };
 
 // ── styles ───────────────────────────────────────────────────────────
@@ -225,6 +226,10 @@ export default function QuizApp() {
     try { return JSON.parse(sessionStorage.getItem("wompwomp-settings")) || { provider: "openai", apiKey: "", model: "gpt-4o-mini" }; }
     catch { return { provider: "openai", apiKey: "", model: "gpt-4o-mini" }; }
   });
+  const [settingsDraft, setSettingsDraft] = useState(settings);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsStatus, setSettingsStatus] = useState(null);
+  const [validatingSettings, setValidatingSettings] = useState(false);
   const [showExplanation, setShowExplanation] = useState(false);
   const [resultData, setResultData] = useState(null);
   const [dragOver, setDragOver] = useState(false);
@@ -243,6 +248,48 @@ export default function QuizApp() {
 
   // fade-in on view change
   useEffect(() => { setFadeIn(false); requestAnimationFrame(() => setFadeIn(true)); }, [view]);
+
+  const openSettings = () => {
+    setSettingsDraft(settings);
+    setSettingsStatus(null);
+    setSettingsOpen(true);
+  };
+
+  const saveAndValidateSettings = async () => {
+    if (!settingsDraft.apiKey.trim() || !settingsDraft.model.trim()) {
+      setSettingsStatus({ ok: false, message: "Enter both an API key and model name." });
+      return;
+    }
+    setValidatingSettings(true);
+    setSettingsStatus(null);
+    const baseUrl = settingsDraft.provider === "openrouter" ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1";
+    const headers = { "Content-Type": "application/json", Authorization: `Bearer ${settingsDraft.apiKey.trim()}` };
+    if (settingsDraft.provider === "openrouter") {
+      headers["HTTP-Referer"] = window.location.origin;
+      headers["X-Title"] = "wompwomp quiz app";
+    }
+    try {
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST", headers,
+        body: JSON.stringify({ model: settingsDraft.model.trim(), max_tokens: 1, temperature: 0,
+          messages: [{ role: "user", content: "Reply with OK." }] }),
+        signal: AbortSignal.timeout(20000),
+      });
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(`Request failed (${response.status})${detail ? `: ${detail.slice(0, 120)}` : ""}`);
+      }
+      const saved = { ...settingsDraft, apiKey: settingsDraft.apiKey.trim(), model: settingsDraft.model.trim() };
+      setSettings(saved);
+      setSettingsDraft(saved);
+      sessionStorage.setItem("wompwomp-settings", JSON.stringify(saved));
+      setSettingsStatus({ ok: true, message: "API connection verified and settings saved in this browser." });
+    } catch (error) {
+      setSettingsStatus({ ok: false, message: error.message || "Could not validate the API connection." });
+    } finally {
+      setValidatingSettings(false);
+    }
+  };
 
   // ── file upload handler ─────────────────────────────────────────
   const handleFile = useCallback((file) => {
@@ -475,13 +522,63 @@ export default function QuizApp() {
               </div>
             </div>
           </div>
-          {view !== "home" && (
-            <Btn variant="ghost" onClick={() => { setView("home"); setActiveQuiz(null); }}
-              icon={<Icons.back size={16} />}>
-              Library
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <Btn variant="ghost" onClick={openSettings} icon={<Icons.settings size={16} />}>
+              Settings
             </Btn>
-          )}
+            {view !== "home" && (
+              <Btn variant="ghost" onClick={() => { setView("home"); setActiveQuiz(null); }}
+                icon={<Icons.back size={16} />}>
+                Library
+              </Btn>
+            )}
+          </div>
         </header>
+
+        {settingsOpen && (
+          <div onClick={e => { if (e.target === e.currentTarget) setSettingsOpen(false); }} style={{
+            position: "fixed", inset: 0, zIndex: 20, background: "rgba(0,0,0,0.7)",
+            display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
+          }}>
+            <Card hover={false} style={{ width: "100%", maxWidth: 520, background: "#17171c", boxShadow: "0 24px 80px rgba(0,0,0,0.5)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                <div>
+                  <div style={{ fontSize: 20, fontWeight: 700 }}>AI grading settings</div>
+                  <div style={{ fontSize: 13, color: "#71717a", marginTop: 6 }}>Validate your connection before saving it in this browser.</div>
+                </div>
+                <Btn variant="ghost" onClick={() => setSettingsOpen(false)} icon={<Icons.x size={18} />} />
+              </div>
+              <div style={{ display: "grid", gap: 12, marginTop: 22 }}>
+                <label style={{ fontSize: 12, color: "#a1a1aa" }}>Provider
+                  <select value={settingsDraft.provider} onChange={e => setSettingsDraft(prev => ({ ...prev, provider: e.target.value }))} style={{ ...inputStyle, width: "100%", display: "block", marginTop: 6 }}>
+                    <option value="openai">OpenAI</option>
+                    <option value="openrouter">OpenRouter</option>
+                  </select>
+                </label>
+                <label style={{ fontSize: 12, color: "#a1a1aa" }}>Model name
+                  <input value={settingsDraft.model} placeholder="gpt-4o-mini or openai/gpt-4o-mini" onChange={e => setSettingsDraft(prev => ({ ...prev, model: e.target.value }))} style={{ ...inputStyle, width: "100%", display: "block", marginTop: 6 }} />
+                </label>
+                <label style={{ fontSize: 12, color: "#a1a1aa" }}>API key
+                  <input type="password" value={settingsDraft.apiKey} placeholder="Your API key" onChange={e => setSettingsDraft(prev => ({ ...prev, apiKey: e.target.value }))} style={{ ...inputStyle, width: "100%", display: "block", marginTop: 6 }} />
+                </label>
+              </div>
+              {settingsStatus && (
+                <div style={{ marginTop: 16, padding: "12px 14px", borderRadius: 10,
+                  color: settingsStatus.ok ? "#4ade80" : "#f87171",
+                  background: settingsStatus.ok ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)",
+                  border: `1px solid ${settingsStatus.ok ? "rgba(34,197,94,0.18)" : "rgba(239,68,68,0.18)"}`,
+                  fontSize: 13, lineHeight: 1.5,
+                }}>{settingsStatus.message}</div>
+              )}
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 22 }}>
+                <Btn variant="ghost" onClick={() => setSettingsOpen(false)}>Cancel</Btn>
+                <Btn onClick={saveAndValidateSettings} disabled={validatingSettings}>
+                  {validatingSettings ? "Validating…" : "Save & Validate"}
+                </Btn>
+              </div>
+            </Card>
+          </div>
+        )}
 
         {/* ════════════════════════════════════════════════════════ */}
         {/* ── HOME VIEW ────────────────────────────────────────── */}
@@ -522,30 +619,6 @@ export default function QuizApp() {
                 or click to browse · supports MCQ, True/False, and short answers
               </div>
             </div>
-
-            <Card hover={false} style={{ marginBottom: 32 }}>
-              <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6 }}>AI grading settings</div>
-              <div style={{ fontSize: 13, color: "#71717a", marginBottom: 16 }}>
-                Optional. Keys stay in this browser session. AI questions fall back to concept matching if unavailable.
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                <select value={settings.provider} onChange={e => {
-                  const next = { ...settings, provider: e.target.value };
-                  setSettings(next); sessionStorage.setItem("wompwomp-settings", JSON.stringify(next));
-                }} style={{ ...inputStyle }}>
-                  <option value="openai">OpenAI</option>
-                  <option value="openrouter">OpenRouter</option>
-                </select>
-                <input value={settings.model} placeholder="Model name" onChange={e => {
-                  const next = { ...settings, model: e.target.value };
-                  setSettings(next); sessionStorage.setItem("wompwomp-settings", JSON.stringify(next));
-                }} style={inputStyle} />
-              </div>
-              <input type="password" value={settings.apiKey} placeholder="API key (optional)" onChange={e => {
-                const next = { ...settings, apiKey: e.target.value };
-                setSettings(next); sessionStorage.setItem("wompwomp-settings", JSON.stringify(next));
-              }} style={{ ...inputStyle, width: "100%", marginTop: 10 }} />
-            </Card>
 
             {/* Stats strip */}
             {store.quizzes.length > 0 && (
