@@ -223,8 +223,11 @@ export default function QuizApp() {
   const [shortAnswerDraft, setShortAnswerDraft] = useState("");
   const [evaluating, setEvaluating] = useState(false);
   const [settings, setSettings] = useState(() => {
-    try { return JSON.parse(sessionStorage.getItem("wompwomp-settings")) || { provider: "openai", apiKey: "", model: "gpt-4o-mini" }; }
-    catch { return { provider: "openai", apiKey: "", model: "gpt-4o-mini" }; }
+    const defaults = { enabled: true, provider: "openai", apiKey: "", model: "gpt-4o-mini" };
+    try {
+      const saved = JSON.parse(sessionStorage.getItem("wompwomp-settings"));
+      return saved ? { ...defaults, ...saved, enabled: saved.enabled !== false } : defaults;
+    } catch { return defaults; }
   });
   const [settingsDraft, setSettingsDraft] = useState(settings);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -256,6 +259,14 @@ export default function QuizApp() {
   };
 
   const saveAndValidateSettings = async () => {
+    if (!settingsDraft.enabled) {
+      const saved = { ...settingsDraft, enabled: false };
+      setSettings(saved);
+      setSettingsDraft(saved);
+      sessionStorage.setItem("wompwomp-settings", JSON.stringify(saved));
+      setSettingsStatus({ ok: true, message: "AI grading is disabled and settings were saved. Concept fallback will be used." });
+      return;
+    }
     if (!settingsDraft.apiKey.trim() || !settingsDraft.model.trim()) {
       setSettingsStatus({ ok: false, message: "Enter both an API key and model name." });
       return;
@@ -401,13 +412,15 @@ export default function QuizApp() {
     let evaluation;
     let fallbackUsed = false;
     try {
-      if (currentQ.answer_mode === "ai" && settings.apiKey && settings.model) {
+      if (currentQ.answer_mode !== "ai") {
+        evaluation = evaluateConcepts(answer, currentQ.fallback || currentQ.answer);
+      } else if (settings.enabled && settings.apiKey && settings.model) {
         evaluation = await evaluateWithAI(currentQ, answer);
-      } else throw new Error("AI is not configured");
+      } else throw new Error(settings.enabled ? "AI is not configured" : "AI grading is disabled");
     } catch (error) {
       fallbackUsed = true;
       evaluation = evaluateConcepts(answer, currentQ.fallback || currentQ.answer);
-      evaluation = { ...evaluation, feedback: `${evaluation.feedback} AI unavailable; fallback used.` };
+      evaluation = { ...evaluation, feedback: `${evaluation.feedback} ${error.message === "AI grading is disabled" ? "AI disabled; fallback used." : "AI unavailable; fallback used."}` };
       console.warn(error);
     }
     setAnswers(prev => ({ ...prev, [qIndex]: answer }));
@@ -419,6 +432,7 @@ export default function QuizApp() {
   const nextQuestion = () => {
     setShowExplanation(false);
     if (qIndex < totalQ - 1) {
+      setShortAnswerDraft("");
       setQIndex(qIndex + 1);
     } else {
       finishQuiz();
@@ -549,6 +563,12 @@ export default function QuizApp() {
                 <Btn variant="ghost" onClick={() => setSettingsOpen(false)} icon={<Icons.x size={18} />} />
               </div>
               <div style={{ display: "grid", gap: 12, marginTop: 22 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 10, background: "rgba(255,255,255,0.04)", color: "#e8e6e3", fontSize: 14, cursor: "pointer" }}>
+                  <input type="checkbox" checked={settingsDraft.enabled !== false}
+                    onChange={e => setSettingsDraft(prev => ({ ...prev, enabled: e.target.checked }))} />
+                  Enable AI grading
+                  <span style={{ color: "#71717a", fontSize: 12, marginLeft: "auto" }}>Off = always use fallback</span>
+                </label>
                 <label style={{ fontSize: 12, color: "#a1a1aa" }}>Provider
                   <select value={settingsDraft.provider} onChange={e => setSettingsDraft(prev => ({ ...prev, provider: e.target.value }))} style={{ ...inputStyle, width: "100%", display: "block", marginTop: 6 }}>
                     <option value="openai">OpenAI</option>
