@@ -17,6 +17,7 @@ so i built this instead. upload a JSON, take a quiz, get your score. that's it.
 - **progress saved** — all quizzes and attempt history persist in localStorage
 - **answer review** — go through every question after finishing to see what you got wrong
 - **retry** — retake any quiz as many times as you want
+- **short answers** — use deterministic concept matching or optional AI grading via OpenAI/OpenRouter
 
 ---
 
@@ -52,6 +53,19 @@ the app expects a `.json` file with this structure:
       "answer": false,
       "explanation": "DNA is double-stranded, forming a double helix structure."
     }
+  ],
+  "short_answer": [
+    {
+      "id": 52,
+      "question": "Why are mitochondria important?",
+      "answer_mode": "ai",
+      "reference_answer": "They produce ATP, providing energy for the cell.",
+      "fallback": {
+        "required": [["ATP", "adenosine triphosphate"], ["energy", "cellular energy"]],
+        "forbidden": ["nucleus"]
+      },
+      "explanation": "Mitochondria produce ATP for cellular energy."
+    }
   ]
 }
 ```
@@ -60,6 +74,9 @@ the app expects a `.json` file with this structure:
 
 - `mcq` array — each item needs `id`, `question`, `options` (A-D), `answer` (letter), `explanation`
 - `true_or_false` array — each item needs `id`, `statement`, `answer` (true/false boolean), `explanation`
+- `short_answer` array — each item needs `id`, `question`, and a `fallback.required` list of concept groups. Each group can contain synonyms.
+- `answer_mode` — use `"ai"` to try the configured AI grader first, or omit it for concept matching. AI questions fall back automatically when AI is unavailable.
+- `reference_answer` — used by AI grading. `fallback.forbidden` can list concepts that make an answer incorrect.
 - `quiz_title` — shows up as the quiz name in the app
 - `total_questions` — optional, just for reference
 - you can have only MCQs, only true/false, or both — the app handles all cases
@@ -86,6 +103,7 @@ that's literally it. claude will output a JSON with the exact format the app exp
 - **be specific about count** — "50 MCQs and 10 true/false" works better than "make some quizzes"
 - **mention it's for a quiz app** — this tells the LLM to output clean structured JSON instead of markdown
 - **ask for explanations** — the app displays them after each answer, super helpful for studying
+- **for short answers, ask for required concepts and synonyms** — for example, `[["ATP", "adenosine triphosphate"], ["energy"]]`; each inner group represents one concept that should be present
 - **split large notes** — if your notes are huge, split by topic/chapter and generate separate quiz files. easier to study in chunks anyway
 - **ask for difficulty levels** — you can add "make 20 easy, 20 medium, 10 hard MCQs" if you want variety
 

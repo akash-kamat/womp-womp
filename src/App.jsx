@@ -19,7 +19,6 @@ function saveStore(data) {
   }
 }
 
-function cn(...c) { return c.filter(Boolean).join(" "); }
 function pct(n, d) { return d ? Math.round((n / d) * 100) : 0; }
 function grade(p) {
   if (p >= 90) return { label: "A+", color: "#16a34a", bg: "#dcfce7" };
@@ -29,10 +28,40 @@ function grade(p) {
   if (p >= 50) return { label: "D", color: "#f97316", bg: "#ffedd5" };
   return { label: "F", color: "#ef4444", bg: "#fee2e2" };
 }
-function fmtDate(d) {
-  return new Date(d).toLocaleDateString("en-US", {
-    month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit",
-  });
+function normalizeAnswer(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function conceptGroups(answer) {
+  if (!answer) return [];
+  if (Array.isArray(answer)) return answer.map(group => Array.isArray(group) ? group : [group]);
+  if (Array.isArray(answer.required)) return answer.required.map(group => Array.isArray(group) ? group : [group]);
+  if (Array.isArray(answer.accepted_answers)) return [answer.accepted_answers];
+  if (typeof answer === "string") return [[answer]];
+  return [];
+}
+
+function evaluateConcepts(userAnswer, fallback) {
+  const text = normalizeAnswer(userAnswer);
+  const groups = conceptGroups(fallback);
+  const matched = groups.filter(group => group.some(term => text.includes(normalizeAnswer(term))));
+  const forbidden = fallback?.forbidden || [];
+  const hasForbidden = forbidden.some(term => text.includes(normalizeAnswer(term)));
+  const score = groups.length ? (hasForbidden ? 0 : matched.length / groups.length) : 0;
+  return {
+    score,
+    correct: score === 1,
+    evaluatedBy: "concepts",
+    matched: matched.flat(),
+    missing: groups.filter(group => !group.some(term => text.includes(normalizeAnswer(term)))).map(group => group.join(" / ")),
+    feedback: hasForbidden ? "Your answer includes a conflicting concept." :
+      score === 1 ? "All required concepts were present." :
+        `You matched ${matched.length} of ${groups.length} required concepts.`,
+  };
 }
 
 // ── icons (inline SVG) ──────────────────────────────────────────────
@@ -85,6 +114,10 @@ const S = {
     position: "relative", zIndex: 1, maxWidth: 860, margin: "0 auto",
     padding: "32px 20px 60px",
   },
+};
+const inputStyle = {
+  background: "rgba(255,255,255,0.04)", color: "#e8e6e3", border: "1px solid rgba(255,255,255,0.1)",
+  borderRadius: 10, padding: "11px 12px", font: "inherit", minWidth: 0,
 };
 
 // ── Animated Progress Ring ───────────────────────────────────────────
@@ -185,6 +218,13 @@ export default function QuizApp() {
   const [quizMode, setQuizMode] = useState("all"); // all | mcq | tf
   const [qIndex, setQIndex] = useState(0);
   const [answers, setAnswers] = useState({});
+  const [evaluations, setEvaluations] = useState({});
+  const [shortAnswerDraft, setShortAnswerDraft] = useState("");
+  const [evaluating, setEvaluating] = useState(false);
+  const [settings, setSettings] = useState(() => {
+    try { return JSON.parse(sessionStorage.getItem("wompwomp-settings")) || { provider: "openai", apiKey: "", model: "gpt-4o-mini" }; }
+    catch { return { provider: "openai", apiKey: "", model: "gpt-4o-mini" }; }
+  });
   const [showExplanation, setShowExplanation] = useState(false);
   const [resultData, setResultData] = useState(null);
   const [dragOver, setDragOver] = useState(false);
@@ -212,8 +252,9 @@ export default function QuizApp() {
       try {
         const data = JSON.parse(e.target.result);
         // validate
-        if (!data.mcq && !data.true_or_false) {
-          alert("Invalid quiz JSON. Must contain 'mcq' and/or 'true_or_false' arrays.");
+        const shortAnswers = data.short_answer || data.short_answers;
+        if (!data.mcq && !data.true_or_false && !shortAnswers) {
+          alert("Invalid quiz JSON. Must contain 'mcq', 'true_or_false', and/or 'short_answer' arrays.");
           return;
         }
         const quiz = {
@@ -221,7 +262,8 @@ export default function QuizApp() {
           title: data.quiz_title || file.name.replace(".json", ""),
           mcqCount: data.mcq?.length || 0,
           tfCount: data.true_or_false?.length || 0,
-          totalQuestions: (data.mcq?.length || 0) + (data.true_or_false?.length || 0),
+          shortAnswerCount: shortAnswers?.length || 0,
+          totalQuestions: (data.mcq?.length || 0) + (data.true_or_false?.length || 0) + (shortAnswers?.length || 0),
           data,
           addedAt: new Date().toISOString(),
         };
@@ -250,6 +292,9 @@ export default function QuizApp() {
     if (quizMode === "all" || quizMode === "tf") {
       (d.true_or_false || []).forEach(q => qs.push({ ...q, type: "tf" }));
     }
+    if (quizMode === "all" || quizMode === "short") {
+      (d.short_answer || d.short_answers || []).forEach(q => qs.push({ ...q, type: "short" }));
+    }
     return qs;
   }, [activeQuiz, quizMode]);
 
@@ -262,6 +307,8 @@ export default function QuizApp() {
     setQuizMode(mode);
     setQIndex(0);
     setAnswers({});
+    setEvaluations({});
+    setShortAnswerDraft("");
     setShowExplanation(false);
     setResultData(null);
     setView("quiz");
@@ -270,6 +317,55 @@ export default function QuizApp() {
   const selectAnswer = (ans) => {
     if (answers[qIndex] !== undefined) return;
     setAnswers(prev => ({ ...prev, [qIndex]: ans }));
+    setEvaluations(prev => ({ ...prev, [qIndex]: {
+      score: ans === currentQ.answer ? 1 : 0,
+      correct: ans === currentQ.answer,
+      evaluatedBy: "exact",
+    }}));
+    setShowExplanation(true);
+  };
+
+  const evaluateWithAI = async (question, answer) => {
+    const baseUrl = settings.provider === "openrouter" ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1";
+    const prompt = `Evaluate the student's answer. Return ONLY JSON with keys score (number 0 to 1), correct (boolean), and feedback (short string). Give partial credit for partially correct answers.\nQuestion: ${question.question}\nReference answer: ${question.reference_answer || question.answer}\nStudent answer: ${answer}`;
+    const headers = { "Content-Type": "application/json", Authorization: `Bearer ${settings.apiKey}` };
+    if (settings.provider === "openrouter") {
+      headers["HTTP-Referer"] = window.location.origin;
+      headers["X-Title"] = "wompwomp quiz app";
+    }
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST", headers,
+      body: JSON.stringify({ model: settings.model, temperature: 0, response_format: { type: "json_object" },
+        messages: [{ role: "system", content: "You are a fair quiz grader. Grade only the answer against the reference answer." }, { role: "user", content: prompt }] }),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!response.ok) throw new Error(`AI request failed (${response.status})`);
+    const data = await response.json();
+    const parsed = JSON.parse(data.choices?.[0]?.message?.content || "{}");
+    const score = Math.max(0, Math.min(1, Number(parsed.score)));
+    if (!Number.isFinite(score)) throw new Error("AI returned an invalid score");
+    return { score, correct: score === 1, evaluatedBy: "ai", feedback: parsed.feedback || "AI evaluated this answer." };
+  };
+
+  const submitShortAnswer = async () => {
+    if (!shortAnswerDraft.trim() || answers[qIndex] !== undefined || evaluating) return;
+    const answer = shortAnswerDraft.trim();
+    setEvaluating(true);
+    let evaluation;
+    let fallbackUsed = false;
+    try {
+      if (currentQ.answer_mode === "ai" && settings.apiKey && settings.model) {
+        evaluation = await evaluateWithAI(currentQ, answer);
+      } else throw new Error("AI is not configured");
+    } catch (error) {
+      fallbackUsed = true;
+      evaluation = evaluateConcepts(answer, currentQ.fallback || currentQ.answer);
+      evaluation = { ...evaluation, feedback: `${evaluation.feedback} AI unavailable; fallback used.` };
+      console.warn(error);
+    }
+    setAnswers(prev => ({ ...prev, [qIndex]: answer }));
+    setEvaluations(prev => ({ ...prev, [qIndex]: { ...evaluation, fallbackUsed } }));
+    setEvaluating(false);
     setShowExplanation(true);
   };
 
@@ -284,10 +380,12 @@ export default function QuizApp() {
 
   const finishQuiz = () => {
     let correct = 0;
+    let points = 0;
     questions.forEach((q, i) => {
       const userAns = answers[i];
-      if (q.type === "mcq" && userAns === q.answer) correct++;
-      if (q.type === "tf" && userAns === q.answer) correct++;
+      const evaluation = evaluations[i] || { score: userAns === q.answer ? 1 : 0, correct: userAns === q.answer };
+      points += evaluation.score || 0;
+      if (evaluation.correct) correct++;
     });
     const result = {
       id: Date.now().toString(36),
@@ -296,9 +394,11 @@ export default function QuizApp() {
       mode: quizMode,
       total: totalQ,
       correct,
-      percentage: pct(correct, totalQ),
+      points,
+      percentage: Math.round((points / totalQ) * 100),
       date: new Date().toISOString(),
       answers: { ...answers },
+      evaluations: { ...evaluations },
     };
     setResultData(result);
     const next = { ...store, results: [result, ...store.results] };
@@ -419,9 +519,33 @@ export default function QuizApp() {
                 Drop your quiz JSON here
               </div>
               <div style={{ fontSize: 14, color: "#71717a" }}>
-                or click to browse · supports MCQ and True/False formats
+                or click to browse · supports MCQ, True/False, and short answers
               </div>
             </div>
+
+            <Card hover={false} style={{ marginBottom: 32 }}>
+              <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6 }}>AI grading settings</div>
+              <div style={{ fontSize: 13, color: "#71717a", marginBottom: 16 }}>
+                Optional. Keys stay in this browser session. AI questions fall back to concept matching if unavailable.
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <select value={settings.provider} onChange={e => {
+                  const next = { ...settings, provider: e.target.value };
+                  setSettings(next); sessionStorage.setItem("wompwomp-settings", JSON.stringify(next));
+                }} style={{ ...inputStyle }}>
+                  <option value="openai">OpenAI</option>
+                  <option value="openrouter">OpenRouter</option>
+                </select>
+                <input value={settings.model} placeholder="Model name" onChange={e => {
+                  const next = { ...settings, model: e.target.value };
+                  setSettings(next); sessionStorage.setItem("wompwomp-settings", JSON.stringify(next));
+                }} style={inputStyle} />
+              </div>
+              <input type="password" value={settings.apiKey} placeholder="API key (optional)" onChange={e => {
+                const next = { ...settings, apiKey: e.target.value };
+                setSettings(next); sessionStorage.setItem("wompwomp-settings", JSON.stringify(next));
+              }} style={{ ...inputStyle, width: "100%", marginTop: 10 }} />
+            </Card>
 
             {/* Stats strip */}
             {store.quizzes.length > 0 && (
@@ -487,6 +611,7 @@ export default function QuizApp() {
                             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
                               {quiz.mcqCount > 0 && <Tag color="#6366f1">{quiz.mcqCount} MCQ</Tag>}
                               {quiz.tfCount > 0 && <Tag color="#a855f7">{quiz.tfCount} T/F</Tag>}
+                              {quiz.shortAnswerCount > 0 && <Tag color="#f59e0b">{quiz.shortAnswerCount} Short</Tag>}
                               <Tag color="#71717a">{quiz.totalQuestions} Total</Tag>
                               {g && <Tag color={g.color}> Best: {bestScore}%</Tag>}
                             </div>
@@ -506,6 +631,10 @@ export default function QuizApp() {
                                   style={{ fontSize: 13, padding: "10px 20px" }}>
                                   True/False
                                 </Btn>
+                              )}
+                              {quiz.shortAnswerCount > 0 && (
+                                <Btn variant="secondary" onClick={() => startQuiz(quiz, "short")}
+                                  style={{ fontSize: 13, padding: "10px 20px" }}>Short Answers</Btn>
                               )}
                               {confirmDelete === quiz.id ? (
                                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -582,8 +711,8 @@ export default function QuizApp() {
 
             {/* Question type badge */}
             <div style={{ margin: "28px 0 20px" }}>
-              <Tag color={currentQ.type === "mcq" ? "#6366f1" : "#a855f7"}>
-                {currentQ.type === "mcq" ? "Multiple Choice" : "True or False"}
+              <Tag color={currentQ.type === "mcq" ? "#6366f1" : currentQ.type === "tf" ? "#a855f7" : "#f59e0b"}>
+                {currentQ.type === "mcq" ? "Multiple Choice" : currentQ.type === "tf" ? "True or False" : "Short Answer"}
               </Tag>
             </div>
 
@@ -592,7 +721,7 @@ export default function QuizApp() {
               fontSize: 20, fontWeight: 600, lineHeight: 1.5, marginBottom: 28,
               letterSpacing: "-0.01em",
             }}>
-              {currentQ.type === "mcq" ? currentQ.question : currentQ.statement}
+              {currentQ.type === "mcq" || currentQ.type === "short" ? currentQ.question : currentQ.statement}
             </div>
 
             {/* Options */}
@@ -638,6 +767,19 @@ export default function QuizApp() {
                     </div>
                   );
                 })
+              ) : currentQ.type === "short" ? (
+                <div>
+                  <textarea value={shortAnswerDraft} disabled={answers[qIndex] !== undefined || evaluating}
+                    onChange={e => setShortAnswerDraft(e.target.value)} placeholder="Type your answer..."
+                    rows={4} style={{ ...inputStyle, width: "100%", resize: "vertical", lineHeight: 1.5 }} />
+                  {answers[qIndex] === undefined && (
+                    <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
+                      <Btn onClick={submitShortAnswer} disabled={!shortAnswerDraft.trim() || evaluating}>
+                        {evaluating ? "Evaluating…" : "Submit Answer"}
+                      </Btn>
+                    </div>
+                  )}
+                </div>
               ) : (
                 ["True", "False"].map((opt) => {
                   const val = opt === "True";
@@ -694,6 +836,11 @@ export default function QuizApp() {
                 <div style={{ fontSize: 14, lineHeight: 1.7, color: "#c4b5fd" }}>
                   {currentQ.explanation}
                 </div>
+              </div>
+            )}
+            {showExplanation && evaluations[qIndex] && (
+              <div style={{ marginTop: 14, fontSize: 13, color: evaluations[qIndex].correct ? "#4ade80" : "#fbbf24" }}>
+                {evaluations[qIndex].feedback} · Evaluated using {evaluations[qIndex].evaluatedBy === "ai" ? "AI" : evaluations[qIndex].evaluatedBy === "concepts" ? "concept matching" : "exact matching"}
               </div>
             )}
 
@@ -802,9 +949,8 @@ export default function QuizApp() {
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                   {questions.map((q, i) => {
                     const userAns = resultData.answers[i];
-                    const isCorrect = q.type === "mcq"
-                      ? userAns === q.answer
-                      : userAns === q.answer;
+                    const evaluation = resultData.evaluations?.[i] || { correct: userAns === q.answer, evaluatedBy: "exact" };
+                    const isCorrect = evaluation.correct;
                     return (
                       <div key={i} style={{
                         padding: "16px 20px", borderRadius: 16,
@@ -826,17 +972,20 @@ export default function QuizApp() {
                               <span style={{ color: "#71717a", fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>
                                 Q{i + 1}
                               </span>{" "}
-                              {q.type === "mcq" ? q.question : q.statement}
+                              {q.type === "mcq" || q.type === "short" ? q.question : q.statement}
                             </div>
                             <div style={{ fontSize: 13, color: "#a1a1aa" }}>
                               <span style={{ color: isCorrect ? "#4ade80" : "#f87171" }}>
-                                Your answer: {q.type === "mcq" ? userAns : (userAns ? "True" : "False")}
+                                Your answer: {q.type === "mcq" ? userAns : q.type === "tf" ? (userAns ? "True" : "False") : userAns}
                               </span>
-                              {!isCorrect && (
+                              {q.type !== "short" && !isCorrect && (
                                 <span style={{ color: "#4ade80", marginLeft: 12 }}>
                                   Correct: {q.type === "mcq" ? q.answer : (q.answer ? "True" : "False")}
                                 </span>
                               )}
+                              <span style={{ color: "#818cf8", marginLeft: 12 }}>
+                                {evaluation.evaluatedBy === "ai" ? "AI evaluated" : evaluation.evaluatedBy === "concepts" ? "Concept fallback" : "Exact match"}
+                              </span>
                             </div>
                             {q.explanation && (
                               <div style={{ fontSize: 12, color: "#71717a", marginTop: 6, lineHeight: 1.6 }}>
